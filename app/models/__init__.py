@@ -7,6 +7,7 @@ from app.models.procurement import (
 )
 from app.models.vendor import VendorBid
 from app.models.audit import AuditLog
+from app.models.catalog import CatalogItem, Catalogue, CatalogueVendor, ItemsWithCategory, VendorReference
 
 __all__ = [
     "Procurement",
@@ -16,4 +17,9 @@ __all__ = [
     "EventType",
     "VendorBid",
     "AuditLog",
+    "CatalogItem",
+    "Catalogue",
+    "CatalogueVendor",
+    "ItemsWithCategory",
+    "VendorReference",
 ]

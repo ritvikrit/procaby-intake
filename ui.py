@@ -49,7 +49,9 @@ def _init_db() -> None:
             generation      TEXT,
             language        TEXT,
             indent          INTEGER,
-            "showInput"     TEXT
+            "showInput"     TEXT,
+            "defaultOpen"   INTEGER DEFAULT 0,
+            "autoCollapse"  INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS elements (
             id               TEXT PRIMARY KEY,
@@ -66,7 +68,8 @@ def _init_db() -> None:
             "autoPlay"       INTEGER,
             "playerConfig"   TEXT,
             "forId"          TEXT,
-            mime             TEXT
+            mime             TEXT,
+            props            TEXT
         );
         CREATE TABLE IF NOT EXISTS feedbacks (
             id         TEXT PRIMARY KEY,
@@ -76,6 +79,18 @@ def _init_db() -> None:
             comment    TEXT
         );
     """)
+    con.commit()
+
+    # Migrate existing DB files that predate newer Chainlit column additions
+    for migration in [
+        'ALTER TABLE steps ADD COLUMN "defaultOpen" INTEGER DEFAULT 0',
+        'ALTER TABLE steps ADD COLUMN "autoCollapse" INTEGER DEFAULT 0',
+        'ALTER TABLE elements ADD COLUMN props TEXT',
+    ]:
+        try:
+            cur.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # column already exists
     con.commit()
     con.close()
 
@@ -107,120 +122,41 @@ PRELOADED = {
     "completion_date": (TODAY + timedelta(days=30)).strftime("%d-%m-%Y"),
 }
 
-# ── Item catalog ──────────────────────────────────────────────────────────────
+# ── Catalog cache (populated from DB on first chat start) ─────────────────────
 
-CATALOG_CATEGORIES: dict[str, list[str]] = {
-    "🔩 Structural / Raw Materials": [
-        "UBE RECT 25363-000",
-        "TUBE RECT 25910-000",
-        "PLATE CUT SHAPE 25161-000",
-        "PLATE CUT SHAPE 25340-000",
-        "BAR RECT FLAT170",
-    ],
-    "🔗 Jaw Couplings": [
-        "Lovejoy L-Series Jaw Coupling - Jaw Size L090",
-        "Lovejoy L-Series Jaw Coupling - Jaw Size L095",
-        "Lovejoy L-Series Jaw Coupling - Jaw Size L100",
-        "Lovejoy L-Series Jaw Coupling - Jaw Size L110",
-        "Lovejoy L-Series Jaw Coupling - Jaw Size L150",
-        "Rexnord Omega Elastomeric Coupling - Jaw Size L090",
-        "Rexnord Omega Elastomeric Coupling - Jaw Size L095",
-        "Rexnord Omega Elastomeric Coupling - Jaw Size L100",
-        "Rexnord Omega Elastomeric Coupling - Jaw Size L110",
-        "Rexnord Omega Elastomeric Coupling - Jaw Size L150",
-    ],
-    "⛓️ Roller Chains": [
-        'Tsubaki RS Roller Chain - RS40 1/2"',
-        'Tsubaki RS Roller Chain - RS50 5/8"',
-        'Tsubaki RS Roller Chain - RS60 3/4"',
-        'Tsubaki RS Roller Chain - RS80 1"',
-        'Tsubaki RS Roller Chain - RS100 1-1/4"',
-        'Renold Synergy Roller Chain - RS40 1/2"',
-        'Renold Synergy Roller Chain - RS50 5/8"',
-        'Renold Synergy Roller Chain - RS60 3/4"',
-        'Renold Synergy Roller Chain - RS80 1"',
-        'Renold Synergy Roller Chain - RS100 1-1/4"',
-    ],
-    "⚙️ Helical Gearboxes": [
-        "SEW-Eurodrive R-Series Helical Gearbox - Ratio 5:1",
-        "SEW-Eurodrive R-Series Helical Gearbox - Ratio 10:1",
-        "SEW-Eurodrive R-Series Helical Gearbox - Ratio 20:1",
-        "SEW-Eurodrive R-Series Helical Gearbox - Ratio 40:1",
-        "SEW-Eurodrive R-Series Helical Gearbox - Ratio 60:1",
-        "Nord SK Helical Gearbox - Ratio 5:1",
-        "Nord SK Helical Gearbox - Ratio 10:1",
-        "Nord SK Helical Gearbox - Ratio 20:1",
-        "Nord SK Helical Gearbox - Ratio 40:1",
-        "Nord SK Helical Gearbox - Ratio 60:1",
-    ],
-    "🔒 Mechanical Seals": [
-        "EagleBurgmann MFL85N Seal - Shaft 35mm",
-        "EagleBurgmann MFL85N Seal - Shaft 40mm",
-        "EagleBurgmann MFL85N Seal - Shaft 50mm",
-        "EagleBurgmann MFL85N Seal - Shaft 60mm",
-        "John Crane Type 2100 Seal - Shaft 25mm",
-        "John Crane Type 2100 Seal - Shaft 35mm",
-        "John Crane Type 2100 Seal - Shaft 40mm",
-        "John Crane Type 2100 Seal - Shaft 50mm",
-        "John Crane Type 2100 Seal - Shaft 60mm",
-    ],
-    "🔧 Globe Valves": [
-        "Samson 3241 Globe Valve - DN15 PN40",
-        "Samson 3241 Globe Valve - DN25 PN40",
-        "Samson 3241 Globe Valve - DN40 PN40",
-        "Samson 3241 Globe Valve - DN50 PN40",
-        "Samson 3241 Globe Valve - DN80 PN40",
-    ],
-    "💨 Pneumatic Cylinders": [
-        "Festo DSBC ISO Cylinder - Ø32 x 100mm",
-        "Festo DSBC ISO Cylinder - Ø40 x 100mm",
-        "Festo DSBC ISO Cylinder - Ø50 x 150mm",
-        "Festo DSBC ISO Cylinder - Ø63 x 200mm",
-        "Festo DSBC ISO Cylinder - Ø80 x 100mm",
-    ],
+_catalog: dict = {
+    "categories": {},      # {category: [item, ...]}
+    "flat": [],            # [item, ...]
+    "vendors": [],         # [vendor_name, ...]
+    "vendor_category_map": {},  # {category: [vendor_name, ...]}
 }
 
-CATALOG_FLAT: list[str] = [i for items in CATALOG_CATEGORIES.values() for i in items]
 
-# ── Vendor list with product-category mapping ─────────────────────────────────
-
-VENDORS = [
-    "Manav Singh", "Vishal Arak", "Chetana", "Karan", "Sham",
-    "Kailas Bhel", "Rohan", "Rishab Borade", "Rahul", "Adinath",
-    "Paras Enterprises", "Rana Enterprises", "Vihan Enterprises",
-    "Shantanu", "Kyc", "Ketan Automation", "Ihan", "Karishma",
-    "Sakshi", "Prabhas",
-]
-
-VENDOR_CATEGORY_MAP: dict[str, list[str]] = {
-    "🔩 Structural / Raw Materials": [
-        "Manav Singh", "Paras Enterprises", "Rana Enterprises", "Vihan Enterprises", "Shantanu",
-    ],
-    "🔗 Jaw Couplings": [
-        "Kailas Bhel", "Ketan Automation", "Vishal Arak", "Rohan", "Prabhas",
-    ],
-    "⛓️ Roller Chains": [
-        "Adinath", "Sham", "Rishab Borade", "Manav Singh", "Rahul",
-    ],
-    "⚙️ Helical Gearboxes": [
-        "Ketan Automation", "Kailas Bhel", "Rishab Borade", "Vihan Enterprises", "Chetana",
-    ],
-    "🔒 Mechanical Seals": [
-        "Kyc", "Ihan", "Karishma", "Sakshi", "Paras Enterprises",
-    ],
-    "🔧 Globe Valves": [
-        "Chetana", "Karan", "Rana Enterprises", "Vishal Arak", "Ihan",
-    ],
-    "💨 Pneumatic Cylinders": [
-        "Karan", "Karishma", "Sakshi", "Rohan", "Prabhas",
-    ],
-}
+async def _load_catalog() -> None:
+    """Fetch catalog and vendor data from the backend API (once per process)."""
+    if _catalog["flat"]:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            items_resp   = await client.get(f"{BASE_URL}/catalog/items",   timeout=10.0)
+            vendors_resp = await client.get(f"{BASE_URL}/catalog/vendors", timeout=10.0)
+            items_resp.raise_for_status()
+            vendors_resp.raise_for_status()
+        items_data   = items_resp.json()
+        vendors_data = vendors_resp.json()
+        _catalog["categories"]         = items_data.get("categories", {})
+        _catalog["flat"]               = [i for lst in _catalog["categories"].values() for i in lst]
+        _catalog["vendors"]            = vendors_data.get("vendors", [])
+        _catalog["vendor_category_map"] = vendors_data.get("category_map", {})
+    except Exception as exc:
+        # Non-fatal: fall back to empty catalog so the UI still starts
+        print(f"[catalog] WARNING: could not load catalog from API — {exc}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_item_category(item_name: str) -> str | None:
-    for cat, items in CATALOG_CATEGORIES.items():
+    for cat, items in _catalog["categories"].items():
         if item_name in items:
             return cat
     return None
@@ -228,19 +164,20 @@ def get_item_category(item_name: str) -> str | None:
 
 def get_filtered_vendors(line_items: list[dict]) -> list[str]:
     categories = {get_item_category(i["name"]) for i in line_items} - {None}
+    all_vendors = _catalog["vendors"]
     if not categories:
-        return VENDORS
+        return all_vendors
     vendor_set: set[str] = set()
     for cat in categories:
-        vendor_set.update(VENDOR_CATEGORY_MAP.get(cat, []))
-    result = [v for v in VENDORS if v in vendor_set]
-    return result if result else VENDORS
+        vendor_set.update(_catalog["vendor_category_map"].get(cat, []))
+    result = [v for v in all_vendors if v in vendor_set]
+    return result if result else all_vendors
 
 
 def search_catalog(keyword: str) -> list[str]:
     kl = keyword.lower()
     words = kl.split()
-    return [item for item in CATALOG_FLAT if all(w in item.lower() for w in words)]
+    return [item for item in _catalog["flat"] if all(w in item.lower() for w in words)]
 
 
 def fmt_inr(amount: float) -> str:
@@ -526,7 +463,7 @@ async def _show_vendor_prompt(data: dict):
 
 
 async def handle_preferred_vendors(text: str, data: dict):
-    vendor_list = data.get("available_vendors", VENDORS)
+    vendor_list = data.get("available_vendors", _catalog["vendors"])
     vendors     = resolve_vendors(text, vendor_list)
     data["preferred_vendors"] = ", ".join(vendors) if vendors else "None"
 
@@ -782,6 +719,7 @@ def header_auth_callback(headers: dict) -> cl.User | None:
 
 @cl.on_chat_start
 async def on_chat_start():
+    await _load_catalog()
     cl.user_session.set("step", "name")
     cl.user_session.set("data", {**PRELOADED, "location": "", "line_items": [], "pending_items": [], "items_to_price": []})
     await say(

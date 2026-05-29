@@ -3,7 +3,12 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    connect_args={"server_settings": {"search_path": "procbay_schema"}},
+)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
