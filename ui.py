@@ -271,9 +271,8 @@ async def handle_name(text: str, data: dict):
 
     if data.get("edit_mode"):
         data["edit_mode"] = False
-        _save(data, "complete")
-        await say(f"✓ Name updated to **{data['requestor_name']}**.")
-        await _show_final_summary(data)
+        _save(data, "ask_more_edits")
+        await say(f"✓ Name updated to **{data['requestor_name']}**.\n\nWould you like to edit anything else? **(Yes / No)**")
         return
 
     _save(data, "location")
@@ -291,9 +290,8 @@ async def handle_location(text: str, data: dict):
 
     if data.get("edit_mode"):
         data["edit_mode"] = False
-        _save(data, "complete")
-        await say(f"✓ Location updated to **{data['location']}**.")
-        await _show_final_summary(data)
+        _save(data, "ask_more_edits")
+        await say(f"✓ Location updated to **{data['location']}**.\n\nWould you like to edit anything else? **(Yes / No)**")
         return
 
     _save(data, "product_search")
@@ -469,9 +467,8 @@ async def handle_preferred_vendors(text: str, data: dict):
 
     if data.get("edit_mode"):
         data["edit_mode"] = False
-        _save(data, "complete")
-        await say(f"✓ Preferred vendors updated to **{data['preferred_vendors']}**.")
-        await _show_final_summary(data)
+        _save(data, "ask_more_edits")
+        await say(f"✓ Preferred vendors updated to **{data['preferred_vendors']}**.\n\nWould you like to edit anything else? **(Yes / No)**")
         return
 
     _save(data, "quotation_status")
@@ -493,13 +490,33 @@ async def handle_quotation_status(text: str, data: dict):
 
     if data.get("edit_mode"):
         data["edit_mode"] = False
-        _save(data, "complete")
-        await say(f"✓ Quotation status updated to **{data['quotation']}**.")
-        await _show_final_summary(data)
+        _save(data, "ask_more_edits")
+        await say(f"✓ Quotation status updated to **{data['quotation']}**.\n\nWould you like to edit anything else? **(Yes / No)**")
         return
 
     _save(data, "complete")
     await _show_final_summary(data)
+
+
+# ── Post-edit confirmation ────────────────────────────────────────────────────
+
+async def handle_ask_more_edits(text: str, data: dict):
+    t = text.lower()
+    if any(w in t for w in ["yes", "yeah", "yep", "sure", "y"]):
+        _save(data, "edit_menu")
+        await say(
+            "What would you like to edit? Type the **number**:\n\n"
+            "`1` Requestor Name\n"
+            "`2` Location\n"
+            "`3` Line Item (quantity / price)\n"
+            "`4` Preferred Vendors\n"
+            "`5` Quotation Status"
+        )
+    elif any(w in t for w in ["no", "nope", "done", "finish", "n"]):
+        _save(data, "complete")
+        await _show_final_summary(data)
+    else:
+        await say("Please reply **Yes** to make more edits or **No** to see the final review.")
 
 
 # ── Edit menu ──────────────────────────────────────────────────────────────────
@@ -585,13 +602,13 @@ async def handle_edit_item_price(text: str, data: dict):
     items[idx]["price"] = price
     data["line_items"]  = items
     data["edit_mode"]   = False
-    _save(data, "complete")
+    _save(data, "ask_more_edits")
     total = running_total(items)
     await say(
         f"✓ Updated **{items[idx]['name']}** → {qty} × {fmt_inr(price)} = **{fmt_inr(qty * price)}**\n"
-        f"New running total: **{fmt_inr(total)}**"
+        f"New running total: **{fmt_inr(total)}**\n\n"
+        "Would you like to edit anything else? **(Yes / No)**"
     )
-    await _show_final_summary(data)
 
 
 # ── Final summary ──────────────────────────────────────────────────────────────
@@ -646,7 +663,7 @@ async def on_submit_pr(_: cl.Action):
     msg  = cl.Message(content="⏳ Submitting your Purchase Request...")
     await msg.send()
     try:
-        items     = data.get("line_items", [])
+        items    = data.get("line_items", [])
         items_txt = ", ".join(
             f"{i['qty']} {i['name']} at {fmt_inr(i['price'])} each" for i in items
         )
@@ -659,10 +676,36 @@ async def on_submit_pr(_: cl.Action):
             f"Required by: {data.get('completion_date')}. "
             f"Location: {data.get('location')}."
         )
+        structured_items = [
+            {
+                "item_name":           i["name"],
+                "quantity":            i["qty"],
+                "unit":                "pcs",
+                "unit_price_inr":      i["price"],
+                "estimated_price_inr": i["qty"] * i["price"],
+                "location":            i.get("location", ""),
+            }
+            for i in items
+        ]
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{BASE_URL}/procurement/",
-                json={"buyer_id": f"buyer_{REQUESTOR_ID}", "natural_language_input": nl_input},
+                json={
+                    "buyer_id":             f"buyer_{REQUESTOR_ID}",
+                    "natural_language_input": nl_input,
+                    "requestor_name":       data.get("requestor_name"),
+                    "location":             data.get("location"),
+                    "department":           data.get("department"),
+                    "email":                data.get("email"),
+                    "phone":                data.get("phone"),
+                    "purchase_type":        data.get("purchase_type"),
+                    "priority":             data.get("priority"),
+                    "completion_date":      data.get("completion_date"),
+                    "reason":               data.get("reason"),
+                    "preferred_vendors":    data.get("preferred_vendors"),
+                    "quotation_received":   data.get("quotation"),
+                    "line_items":           structured_items,
+                },
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -747,6 +790,7 @@ async def on_message(message: cl.Message):
         "item_pricing":      handle_item_pricing,
         "preferred_vendors": handle_preferred_vendors,
         "quotation_status":  handle_quotation_status,
+        "ask_more_edits":    handle_ask_more_edits,
         "edit_menu":         handle_edit_menu,
         "edit_item_select":  handle_edit_item_select,
         "edit_item_price":   handle_edit_item_price,

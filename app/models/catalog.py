@@ -55,5 +55,6 @@ class VendorReference(Base):
     __tablename__ = "vendor_references"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    global_vendor_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     tenant_vendor_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
     meta_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
+import httpx   
 from app.agents.base import BaseAgent, AgentResult
 from app.models.procurement import ProcurementStage, PipelineStatus
-
+from app.config import settings     
 
 class POAgent(BaseAgent):
     async def run(self, state: dict) -> AgentResult:
@@ -33,6 +34,17 @@ class POAgent(BaseAgent):
             "generated_at": str(datetime.utcnow()),
             "status": "ISSUED",
         }
+          # ── Push to ProcaBay ──────────────────────────────────────────
+        if settings.PROCBAY_TOKEN:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    "https://api.procbay.com/purchase-orders",  # their endpoint
+                    json=po_record,
+                    headers={"Authorization": settings.PROCBAY_TOKEN},
+                    timeout=10.0,
+                )
+        # ─────────────────────────────────────────────────────────────
+
 
         return AgentResult(
             status="SUCCESS",

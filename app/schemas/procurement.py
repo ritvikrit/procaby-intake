@@ -15,6 +15,18 @@ class LineItem(BaseModel):
 class IntakeRequest(BaseModel):
     buyer_id: str
     natural_language_input: str
+    requestor_name: str | None = None
+    location: str | None = None
+    department: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    purchase_type: str | None = None
+    priority: str | None = None
+    completion_date: str | None = None
+    reason: str | None = None
+    preferred_vendors: str | None = None
+    quotation_received: str | None = None
+    line_items: list[dict] | None = None
 
 
 class ClarificationResponse(BaseModel):

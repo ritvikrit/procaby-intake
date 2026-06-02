@@ -207,7 +207,7 @@ class OrchestratorEngine:
             await self._log_action(proc, f"ERROR at {stage.value}: {result.message}")
             raise RuntimeError(f"Agent error at {stage.value}: {result.message}")
 
-    async def create_procurement(self, buyer_id: str, natural_language_input: str) -> Procurement:
+    async def create_procurement(self, buyer_id: str, natural_language_input: str, structured_fields: dict | None = None) -> Procurement:
         proc = Procurement(
             buyer_id=buyer_id,
             current_stage=ProcurementStage.INTAKE,
@@ -222,7 +222,8 @@ class OrchestratorEngine:
         await self.db.flush()
 
         try:
-            await self.run_stage(proc.procurement_id, extra_context={"natural_language_input": natural_language_input})
+            extra_context = {"natural_language_input": natural_language_input, **(structured_fields or {})}
+            await self.run_stage(proc.procurement_id, extra_context=extra_context)
         except (HITLRequiredException, ClarificationRequiredException):
             pass
 

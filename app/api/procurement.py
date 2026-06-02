@@ -16,14 +16,15 @@ router = APIRouter()
 async def create_procurement(body: IntakeRequest, db: AsyncSession = Depends(get_db)):
     engine = OrchestratorEngine(db)
     try:
-        proc = await engine.create_procurement(body.buyer_id, body.natural_language_input)
+        extra = body.model_dump(exclude={"buyer_id", "natural_language_input"}, exclude_none=True)
+        proc = await engine.create_procurement(body.buyer_id, body.natural_language_input, extra)
         return {"procurement_id": str(proc.procurement_id), "status": "CREATED"}
     except HITLRequiredException as e:
         return {"status": "PAUSED_HITL", "message": str(e), "stage": e.stage}
     except ClarificationRequiredException as e:
         return {"status": "PAUSED_CLARIFICATION", "question": e.question, "stage": e.stage}
 
-
+#not used in ui currentky
 @router.get("/{procurement_id}/history")
 async def get_history(procurement_id: UUID, db: AsyncSession = Depends(get_db)):
     engine = OrchestratorEngine(db)

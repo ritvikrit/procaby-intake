@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: str | None = None
     MANAGER_THRESHOLD_INR: int = 50_000
     CFO_THRESHOLD_INR: int = 500_000
+    PROCBAY_API_URL: str | None = None
+    PROCBAY_TOKEN: str | None = None
+
+
 
 
 settings = Settings()

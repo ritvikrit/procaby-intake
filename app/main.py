@@ -12,7 +12,16 @@ from app.api import catalog as catalog_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Tables are managed externally in procbay_schema — do not create_all here
+    from app.models.procurement import Procurement
+    from app.models.vendor import VendorBid
+    from app.models.audit import AuditLog
+    from app.database import Base
+    async with engine.begin() as conn:
+        # Only create the app-owned tables; catalog tables already exist in procbay_schema
+        await conn.run_sync(
+            Base.metadata.create_all,
+            tables=[Procurement.__table__, VendorBid.__table__, AuditLog.__table__],
+        )
     yield
     await engine.dispose()
 
