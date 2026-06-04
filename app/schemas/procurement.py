@@ -25,6 +25,7 @@ class IntakeRequest(BaseModel):
     completion_date: str | None = None
     reason: str | None = None
     preferred_vendors: str | None = None
+    preferred_vendor_id: int | None = None
     quotation_received: str | None = None
     line_items: list[dict] | None = None
 

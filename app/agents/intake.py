@@ -16,20 +16,48 @@ PURCHASE_TYPE_MAP = {
     "Operational":          "operational_expenditure",
 }
 
-PROCBAY_HEADERS = {
-    "Authorization":  f"Bearer {settings.PROCBAY_TOKEN}",
-    "x-api-version":  "1",
-    "x-custom-lang":  "en",
-    "x-tenant-id":    "vaibhav",
-    "Content-Type":   "application/json",
+# ProcaBay locations from GET /api/v1/location/dropdown
+PROCBAY_LOCATIONS = {
+    "Pune Office":   {"id": 1, "name": "Pune Office"},
+    "Pune Office 2": {"id": 2, "name": "Pune Office 2"},
+    "Magarpatta":    {"id": 3, "name": "Magarpatta"},
+    "kharadi":       {"id": 4, "name": "kharadi"},
+    "Hinjawdi":      {"id": 5, "name": "Hinjawdi"},
+    "Narhe":         {"id": 6, "name": "Narhe"},
 }
+
+CLAUDE_SYSTEM_PROMPT = """You are a procurement intake parser. Extract structured information from purchase request text and return ONLY valid JSON with no extra text.
+
+Return this exact structure:
+{
+  "line_items": [
+    {
+      "item_name": "string",
+      "quantity": number,
+      "unit": "pcs",
+      "estimated_price_inr": 0.0
+    }
+  ],
+  "deadline": "string or null",
+  "priority": "Urgent or High or Medium or Low",
+  "location": "string or null",
+  "reason": "string or null"
+}
+
+Rules:
+- Extract every item mentioned with its quantity
+- If no quantity is mentioned, default to 1
+- If no unit is mentioned, use "pcs"
+- Priority defaults to "Medium" if not mentioned
+- estimated_price_inr is always 0.0 unless explicitly stated
+- Return only the JSON object, nothing else"""
 
 
 class IntakeAgent(BaseAgent):
     async def run(self, state: dict) -> AgentResult:
         raw_input = state.get("natural_language_input", "")
 
-        # Use pre-structured data from UI if available
+        # ── Structured path: UI submitted rich form data ───────────────────────
         if state.get("line_items"):
             line_items = [
                 {
@@ -39,34 +67,35 @@ class IntakeAgent(BaseAgent):
                     "unit_price_inr":       i.get("unit_price_inr") or i.get("price", 0.0),
                     "estimated_price_inr":  i.get("estimated_price_inr", 0.0),
                     "location":             i.get("location", ""),
+                    "procbay_id":           i.get("procbay_id"),
                 }
                 for i in state["line_items"]
             ]
             total_value = sum(i["estimated_price_inr"] for i in line_items)
 
             intake_record = {
-                "requestor_name":         state.get("requestor_name"),
-                "location":               state.get("location"),
-                "department":             state.get("department"),
-                "email":                  state.get("email"),
-                "phone":                  state.get("phone"),
-                "purchase_type":          state.get("purchase_type"),
-                "priority":               state.get("priority"),
-                "completion_date":        state.get("completion_date"),
-                "reason":                 state.get("reason"),
-                "preferred_vendors":      state.get("preferred_vendors"),
-                "quotation_received":     state.get("quotation_received"),
-                "line_items":             line_items,
+                "requestor_name":            state.get("requestor_name"),
+                "location":                  state.get("location"),
+                "department":                state.get("department"),
+                "email":                     state.get("email"),
+                "phone":                     state.get("phone"),
+                "purchase_type":             state.get("purchase_type"),
+                "priority":                  state.get("priority"),
+                "completion_date":           state.get("completion_date"),
+                "reason":                    state.get("reason"),
+                "preferred_vendors":         state.get("preferred_vendors"),
+                "preferred_vendor_id":       state.get("preferred_vendor_id"),
+                "quotation_received":        state.get("quotation_received"),
+                "line_items":                line_items,
                 "total_estimated_value_inr": total_value,
-                "raw_input":              raw_input,
-                "deadline":               state.get("completion_date"),
+                "raw_input":                 raw_input,
+                "deadline":                  state.get("completion_date"),
+                "parsed_by":                 "structured_form",
             }
 
-            # ── Push to ProcaBay ───────────────────────────────────────────────
             procbay_ref = await self._push_to_procbay(intake_record)
             if procbay_ref:
                 intake_record["procbay_intake_id"] = procbay_ref
-            # ──────────────────────────────────────────────────────────────────
 
             return AgentResult(
                 status="SUCCESS",
@@ -75,39 +104,82 @@ class IntakeAgent(BaseAgent):
                 next_stage=ProcurementStage.APPROVALS,
             )
 
-        # Fallback: parse natural language if no structured data provided
+        # ── NL fallback: try Claude first, then regex ──────────────────────────
         if not raw_input.strip():
             return AgentResult(
                 status="NEEDS_CLARIFICATION",
                 clarification_question="Please describe what items you need to procure, including quantities and any deadlines.",
             )
 
-        line_items = self._extract_line_items(raw_input)
-        total_value = sum(item.get("estimated_price_inr", 0) for item in line_items)
+        parsed = await self._parse_with_claude(raw_input)
 
+        if parsed:
+            line_items  = parsed.get("line_items", [])
+            total_value = sum(i.get("estimated_price_inr", 0) for i in line_items)
+            intake_record = {
+                "line_items":                line_items,
+                "total_estimated_value_inr": total_value,
+                "raw_input":                 raw_input,
+                "deadline":                  parsed.get("deadline"),
+                "priority":                  parsed.get("priority", "Medium"),
+                "location":                  parsed.get("location"),
+                "reason":                    parsed.get("reason"),
+                "parsed_by":                 "claude",
+            }
+            return AgentResult(
+                status="SUCCESS",
+                updated_fields={"intake_record": intake_record},
+                message=f"Claude extracted {len(line_items)} line item(s) from intake.",
+                next_stage=ProcurementStage.APPROVALS,
+            )
+
+        # ── Regex fallback if Claude unavailable ───────────────────────────────
+        line_items  = self._extract_line_items(raw_input)
+        total_value = sum(i.get("estimated_price_inr", 0) for i in line_items)
         intake_record = {
             "line_items":                line_items,
             "total_estimated_value_inr": total_value,
             "raw_input":                 raw_input,
             "deadline":                  self._extract_deadline(raw_input),
+            "parsed_by":                 "regex",
         }
         return AgentResult(
             status="SUCCESS",
             updated_fields={"intake_record": intake_record},
-            message=f"Extracted {len(line_items)} line item(s) from intake.",
+            message=f"Regex extracted {len(line_items)} line item(s) from intake.",
             next_stage=ProcurementStage.APPROVALS,
         )
 
+    async def _parse_with_claude(self, raw_input: str) -> dict | None:
+        """Use Claude to parse natural language into structured intake data."""
+        if not settings.CLAUDE_API_KEY:
+            return None
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=settings.CLAUDE_API_KEY)
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=CLAUDE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": raw_input}],
+            )
+            text = response.content[0].text.strip()
+            return json.loads(text)
+        except Exception as e:
+            print(f"[Claude] WARNING: Failed to parse intake — {e}")
+            return None
+
     async def _push_to_procbay(self, intake_record: dict) -> str | None:
         """Push intake data to ProcaBay as form data and return their intake ID."""
+        print(f"[ProcaBay] URL={settings.PROCBAY_API_URL} TOKEN={bool(settings.PROCBAY_TOKEN)}")
         if not settings.PROCBAY_API_URL or not settings.PROCBAY_TOKEN:
+            print("[ProcaBay] Skipping — URL or TOKEN not set")
             return None
 
         purchase_type = PURCHASE_TYPE_MAP.get(
             intake_record.get("purchase_type", "Hardware"), "consumables"
         )
 
-        # Convert "27-06-2026" → "2026-06-06"
         completion_date = intake_record.get("completion_date", "")
         if completion_date:
             try:
@@ -116,39 +188,51 @@ class IntakeAgent(BaseAgent):
             except ValueError:
                 pass
 
-        # Build items in ProcaBay's expected format
-        items = [
-            {
+        department  = intake_record.get("department", "Engineering")
+        location    = intake_record.get("location", "")
+        tenant_name = "Katalyst Technologies"
+
+        # Resolve ProcaBay location
+        procbay_loc = PROCBAY_LOCATIONS.get(location, {"id": 3, "name": location})
+        location_id = procbay_loc["id"]
+        location_name = procbay_loc["name"]
+
+        # Build items in ProcaBay's exact format
+        items = []
+        for i in intake_record.get("line_items", []):
+            item = {
                 "initial_quantity":    i.get("quantity", 1),
                 "item_name":           i.get("item_name", ""),
                 "price":               i.get("unit_price_inr", 0),
                 "unit_of_measurement": i.get("unit", "pcs"),
-                "location_id":         1,
+                "location_id":         location_id,
             }
-            for i in intake_record.get("line_items", [])
-        ]
+            procbay_id = i.get("procbay_id") or i.get("id")
+            if procbay_id:
+                item["id"] = procbay_id
+            items.append(item)
 
-        # Form data payload — matches exactly what ProcaBay's frontend sends
+        vendor_id = intake_record.get("preferred_vendor_id", "")
+
+        quotation_received = "true" if intake_record.get("quotation_received", "no").lower() == "yes" else "false"
+
         payload = {
-            "business_entity_id":           "1",
-            "name_of_entity":               "1",
-            "requestor_id":                 "130",
-            "department_business_entity":   intake_record.get("department", ""),
-            "department":                   intake_record.get("department", "").lower().replace(" ", "-"),
-            "contact_information_email":    intake_record.get("email", ""),
-            "contact_information_phone_no": intake_record.get("phone", ""),
-            "location_name":                intake_record.get("location", ""),
-            "request_date":                 datetime.now().strftime("%Y-%m-%d"),
-            "purchase_type":                purchase_type,
-            "priority":                     intake_record.get("priority", "Medium"),
-            "currency":                     "INR",
-            "reason_for_purchase":          intake_record.get("reason", ""),
-            "service_completion_date":      completion_date,
-            "preferred_vendors":            "",
-            "have_you_received_a_quotation": "false",
-            "type":                         "PURCHASE_INTAKE",
-            "items":                        json.dumps(items),
-            "estimated_budget":             str(intake_record.get("total_estimated_value_inr", 0)),
+            "type":                          "PURCHASE_INTAKE",
+            "requestor_id":                  "50",
+            "department":                    "katalyst-technologies-operations",
+            "contact_information":           intake_record.get("email", ""),
+            "contact_information_phone_no":  intake_record.get("phone", "").replace("+", "").replace(" ", ""),
+            "location_name":                 location_name,
+            "request_date":                  datetime.now().strftime("%Y-%m-%d"),
+            "purchase_type":                 purchase_type,
+            "priority":                      intake_record.get("priority", "Medium"),
+            "estimated_budget":              str(intake_record.get("total_estimated_value_inr", 0)),
+            "currency":                      "INR",
+            "required_delivery":             completion_date,
+            "reason_for_purchase":           intake_record.get("reason", ""),
+            "preferred_vendors":             intake_record.get("preferred_vendors", ""),
+            "have_you_received_a_quotation": quotation_received,
+            "items":                         json.dumps(items),
         }
 
         headers = {
@@ -162,7 +246,11 @@ class IntakeAgent(BaseAgent):
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{settings.PROCBAY_API_URL}/purchase-intakes/create-purchase-intakes",
-                    data=payload,   # form data, not json
+                    data=payload,
+                    files={
+                        "attachments":              ("", b"", "application/octet-stream"),
+                        "if_yes_attach_quotations": ("", b"", "application/octet-stream"),
+                    },
                     headers=headers,
                     timeout=15.0,
                 )
@@ -187,22 +275,21 @@ class IntakeAgent(BaseAgent):
             name = match.group(3).strip()
             if name:
                 items.append({
-                    "item_name":            name,
-                    "quantity":             qty,
-                    "unit":                 unit.lower(),
-                    "unit_price_inr":       0.0,
-                    "estimated_price_inr":  0.0,
-                    "required_by":          None,
+                    "item_name":           name,
+                    "quantity":            qty,
+                    "unit":                unit.lower(),
+                    "unit_price_inr":      0.0,
+                    "estimated_price_inr": 0.0,
+                    "required_by":         None,
                 })
-
         if not items:
             items.append({
-                "item_name":            text[:200],
-                "quantity":             1,
-                "unit":                 "pcs",
-                "unit_price_inr":       0.0,
-                "estimated_price_inr":  0.0,
-                "required_by":          None,
+                "item_name":           text[:200],
+                "quantity":            1,
+                "unit":                "pcs",
+                "unit_price_inr":      0.0,
+                "estimated_price_inr": 0.0,
+                "required_by":         None,
             })
         return items
 

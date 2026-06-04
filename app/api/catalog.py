@@ -8,7 +8,6 @@ from app.models.catalog import CatalogueVendor, ItemsWithCategory, VendorReferen
 
 router = APIRouter()
 
-# Reusable expression: meta_data->>'name' as a SQLAlchemy column expression
 _vendor_name = VendorReference.meta_data["name"].astext
 
 
@@ -19,18 +18,22 @@ async def get_catalog_items(db: AsyncSession = Depends(get_db)):
     )
     items = result.scalars().all()
     categories: dict[str, list[str]] = defaultdict(list)
+    item_ids: dict[str, int] = {}
     for item in items:
         key = item.cat_name or "Uncategorized"
         categories[key].append(item.item_name)
-    return {"categories": dict(categories)}
+        item_ids[item.item_name] = item.id
+    return {"categories": dict(categories), "item_ids": item_ids}
 
 
 @router.get("/vendors")
 async def get_vendors(db: AsyncSession = Depends(get_db)):
     vendors_result = await db.execute(
-        select(_vendor_name).order_by(_vendor_name)
+        select(VendorReference.global_vendor_id, _vendor_name).order_by(_vendor_name)
     )
-    vendors = [row[0] for row in vendors_result.all() if row[0]]
+    rows = vendors_result.all()
+    vendors = [row[1] for row in rows if row[1]]
+    vendor_ids = {row[1]: row[0] for row in rows if row[1] and row[0]}
 
     vc_result = await db.execute(
         select(_vendor_name, ItemsWithCategory.cat_name)
@@ -43,4 +46,4 @@ async def get_vendors(db: AsyncSession = Depends(get_db)):
         if vendor_name and cat_name:
             category_map[cat_name].append(vendor_name)
 
-    return {"vendors": vendors, "category_map": dict(category_map)}
+    return {"vendors": vendors, "category_map": dict(category_map), "vendor_ids": vendor_ids}
