@@ -192,6 +192,7 @@ STEP 3 — Ask what product or component they are looking for.
   - Search the catalog and suggest matching items.
   - Show matched items as a numbered list.
   - Let them pick by number or name.
+  - IMPORTANT: If the requested item does not exist in the catalog, politely inform the user that the item is unavailable and ask them to search for a different product. Do NOT add unavailable items to the order or proceed further.
   - After each item is added, ask "Would you like to add another product? (Yes / No)"
   - Repeat until they say No.
 
@@ -209,7 +210,7 @@ RULES:
 - Follow the steps in order — do not skip ahead
 - If the user provides info early (e.g. mentions location in step 1), accept it and skip that step
 - Be warm and conversational, not robotic
-- Match items to catalog when possible, but accept any item name
+- STRICT CATALOG RULE: Only accept items that exist in the catalog. Never proceed with items not in the catalog.
 - Always confirm the full summary before outputting the completion block
 
 AVAILABLE CATALOG ITEMS:{categories_text}
@@ -234,6 +235,17 @@ def running_total(items: list) -> float:
 
 async def say(text: str):
     await cl.Message(content=text).send()
+
+
+async def _update_thread_title(title: str) -> None:
+    try:
+        from chainlit.data import get_data_layer
+        data_layer = get_data_layer()
+        thread_id  = cl.context.session.thread_id
+        if data_layer and thread_id:
+            await data_layer.update_thread(thread_id=thread_id, name=title)
+    except Exception as e:
+        print(f"[thread_title] Could not update: {e}")
 
 
 # ── Final summary ─────────────────────────────────────────────────────────────
@@ -283,6 +295,13 @@ Please review your requisition before submission.
 
 @cl.action_callback("submit_pr")
 async def on_submit_pr(_: cl.Action):
+    # Block if already submitted or a submission is in progress (race condition guard)
+    if cl.user_session.get("submitted") or cl.user_session.get("submitting"):
+        await say("⚠️ **Request Already Submitted** — your purchase request has already been submitted and cannot be submitted again. Please start a new chat to raise another request.")
+        return
+
+    cl.user_session.set("submitting", True)
+
     data = cl.user_session.get("data") or {}
     msg  = cl.Message(content="⏳ Submitting your Purchase Request...")
     await msg.send()
@@ -343,10 +362,23 @@ async def on_submit_pr(_: cl.Action):
             f"* **Reference ID:** `{proc_id}`\n"
             f"* **Requestor:** {data.get('requestor_name')} ({REQUESTOR_ID}) — {ENTITY}\n"
             f"* **Total Value:** {fmt_inr(running_total(items))}\n"
-            f"* **Status:** Queued for processing"
+            f"* **Status:** Queued for processing\n\n"
+            f"*This session is now closed. Start a new chat to raise another request.*"
         )
         await msg.update()
+        cl.user_session.set("submitted", True)
+        cl.user_session.set("submitting", False)
+        # Persist submitted state to thread metadata so it survives page refresh
+        try:
+            from chainlit.data import get_data_layer
+            dl = get_data_layer()
+            tid = cl.context.session.thread_id
+            if dl and tid:
+                await dl.update_thread(thread_id=tid, metadata={"submitted": True})
+        except Exception:
+            pass
     except Exception as e:
+        cl.user_session.set("submitting", False)  # allow retry on failure
         msg.content = f"❌ Submission failed: {str(e)}"
         await msg.update()
 
@@ -395,12 +427,25 @@ async def on_chat_start():
     await _load_catalog()
     cl.user_session.set("history", [])
     cl.user_session.set("data", {})
+    cl.user_session.set("submitting", False)
+
+    # Restore submitted state from thread metadata (survives page refresh)
+    try:
+        from chainlit.data import get_data_layer
+        dl = get_data_layer()
+        tid = cl.context.session.thread_id
+        if dl and tid:
+            thread = await dl.get_thread(tid)
+            if thread and thread.metadata and thread.metadata.get("submitted"):
+                cl.user_session.set("submitted", True)
+            else:
+                cl.user_session.set("submitted", False)
+    except Exception:
+        cl.user_session.set("submitted", False)
+
     await say(
-        f"Welcome to **{ENTITY}** Procurement Intake! 👋\n\n"
-        "I'm your procurement assistant. Just tell me what you need — "
-        "you can mention items, quantities, prices and location all at once, "
-        "or we can go step by step.\n\n"
-        "What would you like to procure today?"
+        f"Welcome to **{ENTITY}** Procurement Intake!\n\n"
+        "Could you please share your **full name** to get started?"
     )
 
 
@@ -410,10 +455,19 @@ async def on_message(message: cl.Message):
         await say("❌ Claude API key not configured. Please add CLAUDE_API_KEY to .env")
         return
 
+    if cl.user_session.get("submitted"):
+        await say("Your purchase request has already been submitted. Please start a new chat to raise another request.")
+        return
+
     history: list = cl.user_session.get("history") or []
     data: dict    = cl.user_session.get("data") or {}
 
+    is_first_message = len(history) == 0
     history.append({"role": "user", "content": message.content})
+
+    # Set thread title to user's first message
+    if is_first_message:
+        await _update_thread_title(message.content.strip()[:80])
 
     client   = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
     response = client.messages.create(
@@ -455,6 +509,12 @@ async def on_message(message: cl.Message):
                 "quotation":         parsed.get("quotation", "No"),
             }
             cl.user_session.set("data", data)
+
+            # Update thread title to product name
+            items_for_title = [i.get("name", "") for i in line_items if i.get("name")]
+            if items_for_title:
+                product_title = items_for_title[0] if len(items_for_title) == 1 else f"{items_for_title[0]} +{len(items_for_title)-1} more"
+                await _update_thread_title(product_title)
 
             text_before = reply.split("<PROCUREMENT_READY>")[0].strip()
             if text_before:

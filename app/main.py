@@ -8,6 +8,7 @@ from app.api import procurement as procurement_router
 from app.api import webhooks as webhooks_router
 from app.api import websocket as websocket_router
 from app.api import catalog as catalog_router
+from app.api import chat as chat_router
 
 
 @asynccontextmanager
@@ -45,6 +46,7 @@ app.include_router(procurement_router.router, prefix="/api/v1/procurement", tags
 app.include_router(webhooks_router.router, prefix="/api/v1/webhooks", tags=["webhooks"])
 app.include_router(websocket_router.router, prefix="/ws", tags=["websocket"])
 app.include_router(catalog_router.router, prefix="/api/v1/catalog", tags=["catalog"])
+app.include_router(chat_router.router,    prefix="/api/v1/chat",    tags=["chat"])
 
 
 @app.get("/health")
