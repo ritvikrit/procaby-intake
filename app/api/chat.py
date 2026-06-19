@@ -1,6 +1,6 @@
 import re
 import json
-import anthropic
+import openai
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -218,17 +218,17 @@ async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db)):
     preloaded = session["preloaded"]
     history.append({"role": "user", "content": body.message})
 
-    client = anthropic.Anthropic(api_key=settings.CLAUDE_API_KEY)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=_build_system_prompt(preloaded),
-        messages=history,
+    import os
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",  # switch to gpt-4o for higher quality
+        max_tokens=768,
+        messages=[{"role": "system", "content": _build_system_prompt(preloaded)}, *history],
     )
-    reply = response.content[0].text
+    reply = response.choices[0].message.content
     history.append({"role": "assistant", "content": reply})
 
-    # Check if Claude has finished collecting and signalled completion
+    # Check if model has finished collecting and signalled completion
     if "<PROCUREMENT_READY>" in reply and "</PROCUREMENT_READY>" in reply:
         try:
             json_str = reply.split("<PROCUREMENT_READY>")[1].split("</PROCUREMENT_READY>")[0].strip()

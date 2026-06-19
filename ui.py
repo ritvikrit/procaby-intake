@@ -3,7 +3,7 @@ import os
 import json
 import sqlite3
 import httpx
-import anthropic
+import openai
 import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from datetime import date, timedelta
@@ -109,7 +109,7 @@ ENTITY        = "Katalyst Technologies"
 REQUESTOR_ID  = "AD00076"
 TODAY         = date(2026, 5, 28)
 REQUEST_DATE  = "28-05-2026"
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 PRELOADED = {
     "department":     "Engineering",
@@ -451,8 +451,8 @@ async def on_chat_start():
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    if not CLAUDE_API_KEY:
-        await say("❌ Claude API key not configured. Please add CLAUDE_API_KEY to .env")
+    if not OPENAI_API_KEY:
+        await say("❌ OpenAI API key not configured. Please add OPENAI_API_KEY to .env")
         return
 
     if cl.user_session.get("submitted"):
@@ -469,22 +469,50 @@ async def on_message(message: cl.Message):
     if is_first_message:
         await _update_thread_title(message.content.strip()[:80])
 
-    client   = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=_build_system_prompt(),
-        messages=history,
-    )
-    reply = response.content[0].text
+    # Stream response — tokens appear as model generates them
+    client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-    history.append({"role": "assistant", "content": reply})
+    msg = cl.Message(content="")
+    await msg.send()
+
+    full_reply       = ""
+    streaming_paused = False
+
+    try:
+        stream = await client.chat.completions.create(
+            model="gpt-4o-mini",  # switch to gpt-4o for higher quality
+            max_tokens=768,
+            messages=[{"role": "system", "content": _build_system_prompt()}, *history],
+            stream=True,
+        )
+        async for chunk in stream:
+            text = chunk.choices[0].delta.content or ""
+            if not text:
+                continue
+            full_reply += text
+            if not streaming_paused:
+                if "<PROCUREMENT_READY>" in full_reply:
+                    streaming_paused = True
+                    msg.content = full_reply.split("<PROCUREMENT_READY>")[0].strip()
+                    await msg.update()
+                else:
+                    await msg.stream_token(text)
+
+        if not streaming_paused:
+            await msg.update()
+
+    except Exception as api_err:
+        msg.content = f"❌ Error: {api_err}"
+        await msg.update()
+        return
+
+    history.append({"role": "assistant", "content": full_reply})
     cl.user_session.set("history", history)
 
     # Check if Claude has all info and signalled completion
-    if "<PROCUREMENT_READY>" in reply and "</PROCUREMENT_READY>" in reply:
+    if "<PROCUREMENT_READY>" in full_reply and "</PROCUREMENT_READY>" in full_reply:
         try:
-            json_str = reply.split("<PROCUREMENT_READY>")[1].split("</PROCUREMENT_READY>")[0].strip()
+            json_str = full_reply.split("<PROCUREMENT_READY>")[1].split("</PROCUREMENT_READY>")[0].strip()
             parsed   = json.loads(json_str)
 
             # Enrich line items with ProcaBay item IDs
@@ -516,15 +544,7 @@ async def on_message(message: cl.Message):
                 product_title = items_for_title[0] if len(items_for_title) == 1 else f"{items_for_title[0]} +{len(items_for_title)-1} more"
                 await _update_thread_title(product_title)
 
-            text_before = reply.split("<PROCUREMENT_READY>")[0].strip()
-            if text_before:
-                await say(text_before)
-
             await _show_final_summary(data)
             return
         except Exception as e:
             print(f"[Claude] Failed to parse completion JSON: {e}")
-
-    # Normal reply — strip any broken completion block
-    clean_reply = re.sub(r"<PROCUREMENT_READY>.*?</PROCUREMENT_READY>", "", reply, flags=re.DOTALL).strip()
-    await say(clean_reply)

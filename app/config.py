@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me"
     AUCTION_DEFAULT_DURATION_SECONDS: int = 300
     CLAUDE_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
     MANAGER_THRESHOLD_INR: int = 50_000
     CFO_THRESHOLD_INR: int = 500_000
     PROCBAY_API_URL: str | None = None

@@ -151,22 +151,26 @@ class IntakeAgent(BaseAgent):
         )
 
     async def _parse_with_claude(self, raw_input: str) -> dict | None:
-        """Use Claude to parse natural language into structured intake data."""
-        if not settings.CLAUDE_API_KEY:
+        """Use OpenAI to parse natural language into structured intake data."""
+        import os
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
             return None
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=settings.CLAUDE_API_KEY)
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
                 max_tokens=1024,
-                system=CLAUDE_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": raw_input}],
+                messages=[
+                    {"role": "system", "content": CLAUDE_SYSTEM_PROMPT},
+                    {"role": "user", "content": raw_input},
+                ],
             )
-            text = response.content[0].text.strip()
+            text = response.choices[0].message.content.strip()
             return json.loads(text)
         except Exception as e:
-            print(f"[Claude] WARNING: Failed to parse intake — {e}")
+            print(f"[OpenAI] WARNING: Failed to parse intake — {e}")
             return None
 
     async def _push_to_procbay(self, intake_record: dict) -> str | None:
